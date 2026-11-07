@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { cloud } from "@/lib/cloud";
+import { useParams } from "next/navigation";
+import { adminWrite } from "@/lib/adminDb";
 import { getWorkById } from "@/lib/queries";
 import type { Work } from "@/lib/types";
 
@@ -10,7 +10,6 @@ const CATEGORIES = ["中国现代散文", "公版古文", "外国经典", "儿�
 
 export default function EditWorkPage() {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
   const [work, setWork] = useState<Work | null>(null);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -32,9 +31,10 @@ export default function EditWorkPage() {
   const save = async () => {
     setSaving(true);
     setMsg("");
-    const { error } = await cloud.database
-      .from("works")
-      .update({
+    const { error } = await adminWrite({
+      table: "works",
+      op: "update",
+      data: {
         title: work.title,
         author: work.author,
         era: work.era,
@@ -43,10 +43,11 @@ export default function EditWorkPage() {
         content: work.content,
         source_url: work.source_url,
         updated_at: new Date().toISOString(),
-      })
-      .eq("id", work.id);
+      },
+      match: { id: work.id },
+    });
     setSaving(false);
-    setMsg(error ? `保存失败：${(error as Error).message}` : "已保存。");
+    setMsg(error ? `保存失败：${error}` : "已保存。");
   };
 
   const field =

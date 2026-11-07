@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { cloud } from "@/lib/cloud";
+import { adminWrite } from "@/lib/adminDb";
 import { listAudiences, listInterpretations, listStyles, listWorks } from "@/lib/queries";
 import { INTERP_STATUS, formatBookTitle } from "@/lib/types";
 import type { Audience, Interpretation, Style, Work } from "@/lib/types";
@@ -76,12 +76,14 @@ export default function ReviewPage() {
   const shown = interps.filter((i) => i.status === tab);
 
   const setStatus = async (i: Interpretation, status: string) => {
-    const { error } = await cloud.database
-      .from("interpretations")
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq("id", i.id);
+    const { error } = await adminWrite({
+      table: "interpretations",
+      op: "update",
+      data: { status, updated_at: new Date().toISOString() },
+      match: { id: i.id },
+    });
     if (error) {
-      setMsg(`操作失败：${(error as Error).message}`);
+      setMsg(`操作失败：${error}`);
     } else {
       setMsg(status === "published" ? "已发布。" : status === "rejected" ? "已退回。" : "已转待审核。");
       reload();
@@ -106,15 +108,17 @@ export default function ReviewPage() {
           .map((b) => ({ title: b.title.trim(), reason: b.reason.trim() }))
           .filter((b) => b.title),
       };
-      const { error } = await cloud.database
-        .from("interpretations")
-        .update({
+      const { error } = await adminWrite({
+        table: "interpretations",
+        op: "update",
+        data: {
           structured_content: content,
           summary: content.summary || i.summary,
           updated_at: new Date().toISOString(),
-        })
-        .eq("id", i.id);
-      if (error) throw error;
+        },
+        match: { id: i.id },
+      });
+      if (error) throw new Error(error);
       setMsg("内容已更新。");
       setEditing(null);
       reload();
@@ -125,7 +129,12 @@ export default function ReviewPage() {
 
   const remove = async (i: Interpretation) => {
     if (!confirm("确认删除该解读？不可恢复。")) return;
-    await cloud.database.from("interpretations").delete().eq("id", i.id);
+    const { error } = await adminWrite({
+      table: "interpretations",
+      op: "delete",
+      match: { id: i.id },
+    });
+    if (error) setMsg(`删除失败：${error}`);
     reload();
   };
 

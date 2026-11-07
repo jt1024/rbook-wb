@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { cloud } from "@/lib/cloud";
+import { adminWrite } from "@/lib/adminDb";
 import { listAudiences, listStyles } from "@/lib/queries";
 import type { Audience, Style } from "@/lib/types";
 
@@ -24,21 +24,25 @@ export default function DictionariesPage() {
   }, []);
 
   const saveStyle = async (s: Style) => {
-    const { error } = await cloud.database
-      .from("styles")
-      .update({ name: s.name, description: s.description, prompt_template: s.prompt_template })
-      .eq("id", s.id);
-    setMsg(error ? `保存失败：${(error as Error).message}` : `已更新「${s.name}」。`);
+    const { error } = await adminWrite({
+      table: "styles",
+      op: "update",
+      data: { name: s.name, description: s.description, prompt_template: s.prompt_template },
+      match: { id: s.id },
+    });
+    setMsg(error ? `保存失败：${error}` : `已更新「${s.name}」。`);
     if (!error) setEditingStyle(null);
     reload();
   };
 
   const saveAudience = async (a: Audience) => {
-    const { error } = await cloud.database
-      .from("audiences")
-      .update({ name: a.name, description: a.description, prompt_suffix: a.prompt_suffix })
-      .eq("id", a.id);
-    setMsg(error ? `保存失败：${(error as Error).message}` : `已更新「${a.name}」。`);
+    const { error } = await adminWrite({
+      table: "audiences",
+      op: "update",
+      data: { name: a.name, description: a.description, prompt_suffix: a.prompt_suffix },
+      match: { id: a.id },
+    });
+    setMsg(error ? `保存失败：${error}` : `已更新「${a.name}」。`);
     if (!error) setEditingAudience(null);
     reload();
   };
@@ -47,14 +51,18 @@ export default function DictionariesPage() {
     const name = prompt("新风格的名称（如：汪曾祺体）：");
     if (!name) return;
     const slug = `style-${Date.now().toString(36)}`;
-    const { error } = await cloud.database.from("styles").insert({
-      slug,
-      name,
-      description: "（请补充描述）",
-      prompt_template: "你是____（请在此填写该解读人格的语气、视角与语言特征设定）。你的解读……",
-      sort_order: styles.length + 1,
+    const { error } = await adminWrite({
+      table: "styles",
+      op: "insert",
+      data: {
+        slug,
+        name,
+        description: "（请补充描述）",
+        prompt_template: "你是____（请在此填写该解读人格的语气、视角与语言特征设定）。你的解读……",
+        sort_order: styles.length + 1,
+      },
     });
-    setMsg(error ? `新增失败：${(error as Error).message}` : `已新增风格「${name}」，请编辑其提示词模板。`);
+    setMsg(error ? `新增失败：${error}` : `已新增风格「${name}」，请编辑其提示词模板。`);
     reload();
   };
 
@@ -62,14 +70,18 @@ export default function DictionariesPage() {
     const name = prompt("新人群的名称（如：职场新人）：");
     if (!name) return;
     const slug = `aud-${Date.now().toString(36)}`;
-    const { error } = await cloud.database.from("audiences").insert({
-      slug,
-      name,
-      description: "（请补充描述）",
-      prompt_suffix: "读者是____：（请填写该人群的阅读场景与语言要求）",
-      sort_order: audiences.length + 1,
+    const { error } = await adminWrite({
+      table: "audiences",
+      op: "insert",
+      data: {
+        slug,
+        name,
+        description: "（请补充描述）",
+        prompt_suffix: "读者是____：（请填写该人群的阅读场景与语言要求）",
+        sort_order: audiences.length + 1,
+      },
     });
-    setMsg(error ? `新增失败：${(error as Error).message}` : `已新增人群「${name}」，请编辑其受众侧写。`);
+    setMsg(error ? `新增失败：${error}` : `已新增人群「${name}」，请编辑其受众侧写。`);
     reload();
   };
 

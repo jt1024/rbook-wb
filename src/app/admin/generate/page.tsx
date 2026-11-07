@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { generateInterpretation, listModels } from "@/lib/ai";
-import { cloud } from "@/lib/cloud";
+import { adminWrite } from "@/lib/adminDb";
 import { listAudiences, listStyles, listWorks } from "@/lib/queries";
 import type { Audience, Style, Work } from "@/lib/types";
 
@@ -68,19 +68,20 @@ export default function GeneratePage() {
     let jobId: number | null = null;
     try {
       // 1. 落一条任务记录
-      const { data, error } = await cloud.database
-        .from("generation_jobs")
-        .insert({
+      const { data, error } = await adminWrite({
+        table: "generation_jobs",
+        op: "insert",
+        data: {
           work_id: work.id,
           style_id: style.id,
           audience_id: audience.id,
           model: modelId,
           status: "running",
           started_at: new Date().toISOString(),
-        })
-        .select();
-      if (error) throw new Error(`任务创建失败：${(error as Error).message}`);
-      jobId = (Array.isArray(data) ? (data[0] as { id: number }) : null)?.id ?? null;
+        },
+      });
+      if (error) throw new Error(`任务创建失败：${error}`);
+      jobId = (data?.[0]?.id as number | undefined) ?? null;
 
       // 2. 调用 LLM 生成
       setProgress(`正在以「${style.name}」的口吻解读《${work.title}》…（约需 1-2 分钟）`);
@@ -88,9 +89,10 @@ export default function GeneratePage() {
 
       // 3. 质量校验后落库为待审核
       setProgress(`生成完成，质量评分 ${res.score} 分，正在保存…`);
-      const { error: saveErr } = await cloud.database
-        .from("interpretations")
-        .insert({
+      const { error: saveErr } = await adminWrite({
+        table: "interpretations",
+        op: "insert",
+        data: {
           work_id: work.id,
           style_id: style.id,
           audience_id: audience.id,
@@ -101,18 +103,18 @@ export default function GeneratePage() {
           ai_model: res.model,
           quality_score: res.score,
           status: "pending_review",
-        });
-      if (saveErr) throw new Error(`解读保存失败：${(saveErr as Error).message}`);
+        },
+      });
+      if (saveErr) throw new Error(`解读保存失败：${saveErr}`);
 
       // 4. 更新任务状态
       if (jobId) {
-        await cloud.database
-          .from("generation_jobs")
-          .update({
-            status: "success",
-            finished_at: new Date().toISOString(),
-          })
-          .eq("id", jobId);
+        await adminWrite({
+          table: "generation_jobs",
+          op: "update",
+          data: { status: "success", finished_at: new Date().toISOString() },
+          match: { id: jobId },
+        });
       }
 
       setProgress("");
@@ -123,15 +125,17 @@ export default function GeneratePage() {
       const errMsg = (e as Error).message ?? String(e);
       setMsg(`生成失败：${errMsg}`);
       if (jobId) {
-        await cloud.database
-          .from("generation_jobs")
-          .update({
+        await adminWrite({
+          table: "generation_jobs",
+          op: "update",
+          data: {
             status: "failed",
             error: errMsg.slice(0, 500),
             finished_at: new Date().toISOString(),
             retry_count: 1,
-          })
-          .eq("id", jobId);
+          },
+          match: { id: jobId },
+        });
       }
     } finally {
       setRunning(false);

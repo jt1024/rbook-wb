@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { adminWrite } from "@/lib/adminDb";
 import { listWorks } from "@/lib/queries";
 import { WORK_STATUS } from "@/lib/types";
 import type { Work } from "@/lib/types";
@@ -21,13 +22,14 @@ export default function AdminWorksPage() {
 
   const toggleStatus = async (w: Work) => {
     const next = w.status === "published" ? "draft" : "published";
-    const { cloud } = await import("@/lib/cloud");
-    const { error } = await cloud.database
-      .from("works")
-      .update({ status: next, updated_at: new Date().toISOString() })
-      .eq("id", w.id);
+    const { error } = await adminWrite({
+      table: "works",
+      op: "update",
+      data: { status: next, updated_at: new Date().toISOString() },
+      match: { id: w.id },
+    });
     if (error) {
-      setMsg(`操作失败：${(error as Error).message}`);
+      setMsg(`操作失败：${error}`);
     } else {
       setMsg(`已将《${w.title}》设为${WORK_STATUS[next]}`);
       reload();
@@ -36,10 +38,9 @@ export default function AdminWorksPage() {
 
   const remove = async (w: Work) => {
     if (!confirm(`确认删除《${w.title}》及其全部解读？该操作不可恢复。`)) return;
-    const { cloud } = await import("@/lib/cloud");
-    const { error } = await cloud.database.from("works").delete().eq("id", w.id);
+    const { error } = await adminWrite({ table: "works", op: "delete", match: { id: w.id } });
     if (error) {
-      setMsg(`删除失败：${(error as Error).message}`);
+      setMsg(`删除失败：${error}`);
     } else {
       setMsg(`已删除《${w.title}》`);
       reload();

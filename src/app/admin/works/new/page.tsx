@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { cloud } from "@/lib/cloud";
+import { adminWrite } from "@/lib/adminDb";
 import { listModels } from "@/lib/ai";
 import { makeSlug } from "@/lib/queries";
 
@@ -265,9 +266,10 @@ export default function NewWorkPage() {
     }
     setSaving(true);
     setMsg("");
-    const { data, error } = await cloud.database
-      .from("works")
-      .insert({
+    const { data, error } = await adminWrite({
+      table: "works",
+      op: "insert",
+      data: {
         slug: makeSlug(title),
         title: title.trim(),
         author: author.trim() || null,
@@ -278,15 +280,15 @@ export default function NewWorkPage() {
         intro: intro.trim() || null,
         content: content.trim() || null,
         status: "draft",
-      })
-      .select();
+      },
+    });
     setSaving(false);
     if (error) {
-      setMsg(`保存失败：${(error as Error).message}`);
+      setMsg(`保存失败：${error}`);
       return;
     }
-    const created = Array.isArray(data) ? data[0] : null;
-    router.push(created ? `/admin/works/${(created as { id: number }).id}/edit` : "/admin/works");
+    const created = data?.[0] as { id: number } | undefined;
+    router.push(created ? `/admin/works/${created.id}/edit` : "/admin/works");
   };
 
   const field =
