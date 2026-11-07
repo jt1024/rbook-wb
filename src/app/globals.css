@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --background: #faf9f5;
+  --foreground: #2b2924;
+  --accent: #8c2f1b;
+  --muted: #7a7468;
+  --card: #ffffff;
+  --border: #e7e2d6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-muted: var(--muted);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --font-serif-read: "Songti SC", "Noto Serif SC", "STSong", "SimSun", serif;
+}
+
+html {
+  background: var(--background);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+/* 正文阅读排版 */
+.article-serif {
+  font-family: var(--font-serif-read);
+  font-size: 1.075rem;
+  line-height: 2;
+  letter-spacing: 0.02em;
+}
+
+.article-serif p {
+  margin-bottom: 1.25em;
+  text-indent: 2em;
+}
+
+.article-serif p.no-indent {
+  text-indent: 0;
+}
+
+.prose-interp p {
+  margin-bottom: 1.1em;
+  line-height: 1.95;
+}
