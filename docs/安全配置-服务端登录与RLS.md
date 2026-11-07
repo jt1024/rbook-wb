@@ -1,20 +1,25 @@
-# 安全配置：服务端登录与 RLS
+# 安全配置：服务端登录、RLS 与 AI 代理
 
-> 本文说明后台登录与数据库写权限的设计、所需环境变量，以及云端对象如何重建。
+> 本文说明后台登录、数据库读写代理、AI 调用代理的设计、所需环境变量，以及云端对象如何重建。
 > 所有密钥都**不进代码仓库**；仓库内只保留带占位符的模板。
 
 ## 一、分层设计
 
 ```
-浏览器
-  ├─ 读数据：直接走云 SDK（RLS 允许匿名 SELECT，无写权限）
-  ├─ 登录：POST /api/admin/login → 服务端比对 ADMIN_PASSWORD → httpOnly 会话 cookie
-  └─ 写数据：POST /api/admin/db → 校验签名 cookie → 云端 admin_write() 函数
-                                   （SECURITY DEFINER，校验服务端密钥后执行）
+浏览器（不持有任何云凭证）
+  ├─ 读数据：POST /api/data ───────────┐
+  ├─ 登录：  POST /api/admin/login     │  服务端（Node.js）
+  ├─ 写数据：POST /api/admin/db  ─────┼→ 校验 httpOnly 会话 cookie
+  └─ AI：    /api/ai/{models,generate,search}
+                                       ├→ 云 SDK 直连数据库 / LLM 网关
+                                       └→ 匿名访问强制只看已发布内容
 ```
 
 - 口令只存在于服务端 `ADMIN_PASSWORD`，前端 bundle 里没有任何口令。
+- 云服务的 `endpoint` / `publishableKey` 也已从前端源码移到服务端环境变量；浏览器只访问本站 `/api/*`，不再直连数据库或 LLM 网关。
 - 会话 cookie：`HMAC-SHA256` 签名，含过期时间，`httpOnly` + `sameSite=strict`，默认 7 天。
+- `/api/data` 是只读白名单代理：匿名请求强制过滤 `status='published'`，且剔除挂在未发布作品上的解读；`generation_jobs` 等后台数据要求登录态。
+- `/api/ai/*` 全部要求登录态并带进程内限流；模型成功率统计与全文检索缓存放在服务端（`.data/ai-search-state.json`，重启不丢失）。
 - 数据库 5 张表（works / styles / audiences / interpretations / generation_jobs）的 RLS 策略**只有 SELECT**，匿名与登录用户都无法直接 INSERT/UPDATE/DELETE。
 - 唯一的写入口是 `SECURITY DEFINER` 函数 `public.admin_write()`，它校验服务端密钥后才执行，且对表名、操作类型、列名做白名单校验。
 
@@ -29,6 +34,10 @@
 | `ADMIN_PASSWORD` | 后台登录口令 | 自定义强口令，不写进任何代码文件 |
 | `SESSION_SECRET` | 会话 cookie 签名密钥 | `openssl rand -hex 32` |
 | `ADMIN_DB_SECRET` | 服务端调用 `admin_write()` 的密钥 | `openssl rand -hex 32`，需与云端函数内的哈希对应 |
+| `CLOUD_ENDPOINT` | 云服务数据面地址 | 云服务开通时返回 |
+| `CLOUD_PUBLISHABLE_KEY` | 云服务 publishable key | `wbpk_` 开头，仅服务端使用 |
+| `CLOUD_OAUTH_RELAY_BASE_URL` | OAuth relay 地址 | 可选，默认官方地址 |
+| `CLOUD_RESOURCE_ID` | 资源 ID | 可选，留档用 |
 
 云端函数里存的是 `ADMIN_DB_SECRET` 的 **MD5 哈希**，不是明文：
 `printf '%s' "$ADMIN_DB_SECRET" | md5 -q`

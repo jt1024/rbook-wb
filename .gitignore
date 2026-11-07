@@ -44,3 +44,6 @@ next-env.d.ts
 .npm-tmp/
 .wbapp_*.genie
 .codebuddy/
+
+# 服务端 AI 检索的本地持久化状态（含缓存，不入库）
+.data/

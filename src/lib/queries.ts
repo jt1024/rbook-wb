@@ -1,20 +1,46 @@
-import { cloud, safeQuery } from "./cloud";
+// 浏览器侧数据访问层：所有读取统一走本站 /api/data 代理。
+// 云 SDK、endpoint 与 publishableKey 都只存在于服务端，前端 bundle 不再包含它们。
+
 import type { Audience, Interpretation, Style, Work } from "./types";
 
-// ---------- 通用查询封装（前台与后台共用） ----------
+async function call<T>(op: string, args: unknown): Promise<T> {
+  const res = await fetch("/api/data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ op, args }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let message = `请求失败（HTTP ${res.status}）`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      // 忽略非 JSON 响应
+    }
+    throw new Error(message);
+  }
+  const json = (await res.json()) as { data?: T; error?: string };
+  if (json.error) throw new Error(json.error);
+  return json.data as T;
+}
+
+// 与旧版 safeQuery 一致的优雅降级：出错时返回空值，不中断页面渲染。
+async function safeCall<T>(op: string, args: unknown, fallback: T): Promise<T> {
+  try {
+    return await call<T>(op, args);
+  } catch (e) {
+    console.error("[api]", op, e);
+    return fallback;
+  }
+}
 
 export async function listStyles(): Promise<Style[]> {
-  const data = await safeQuery(() =>
-    cloud.database.from("styles").select("*").order("sort_order")
-  );
-  return (data as Style[] | null) ?? [];
+  return safeCall<Style[]>("listStyles", {}, []);
 }
 
 export async function listAudiences(): Promise<Audience[]> {
-  const data = await safeQuery(() =>
-    cloud.database.from("audiences").select("*").order("sort_order")
-  );
-  return (data as Audience[] | null) ?? [];
+  return safeCall<Audience[]>("listAudiences", {}, []);
 }
 
 export async function listWorks(opts?: {
@@ -23,28 +49,15 @@ export async function listWorks(opts?: {
   q?: string;
   limit?: number;
 }): Promise<Work[]> {
-  let q = cloud.database.from("works").select("*");
-  if (opts?.status) q = q.eq("status", opts.status);
-  if (opts?.category) q = q.eq("category", opts.category);
-  if (opts?.q) q = q.or(`title.ilike.%${opts.q}%,author.ilike.%${opts.q}%`);
-  q = q.order("created_at", { ascending: false });
-  if (opts?.limit) q = q.limit(opts.limit);
-  const data = await safeQuery(() => q);
-  return (data as Work[] | null) ?? [];
+  return safeCall<Work[]>("listWorks", opts ?? {}, []);
 }
 
 export async function getWorkBySlug(slug: string): Promise<Work | null> {
-  const data = await safeQuery(() =>
-    cloud.database.from("works").select("*").eq("slug", slug).maybeSingle()
-  );
-  return (data as Work | null) ?? null;
+  return safeCall<Work | null>("getWorkBySlug", { slug }, null);
 }
 
 export async function getWorkById(id: number): Promise<Work | null> {
-  const data = await safeQuery(() =>
-    cloud.database.from("works").select("*").eq("id", id).maybeSingle()
-  );
-  return (data as Work | null) ?? null;
+  return safeCall<Work | null>("getWorkById", { id }, null);
 }
 
 export async function listInterpretations(opts?: {
@@ -53,38 +66,21 @@ export async function listInterpretations(opts?: {
   audienceId?: number;
   status?: string;
 }): Promise<Interpretation[]> {
-  let q = cloud.database.from("interpretations").select("*");
-  if (opts?.workId) q = q.eq("work_id", opts.workId);
-  if (opts?.styleId) q = q.eq("style_id", opts.styleId);
-  if (opts?.audienceId) q = q.eq("audience_id", opts.audienceId);
-  if (opts?.status) q = q.eq("status", opts.status);
-  q = q.order("created_at", { ascending: false });
-  const data = await safeQuery(() => q);
-  return (data as Interpretation[] | null) ?? [];
+  return safeCall<Interpretation[]>("listInterpretations", opts ?? {}, []);
 }
 
 export async function getInterpretationById(
   id: number
 ): Promise<Interpretation | null> {
-  const data = await safeQuery(() =>
-    cloud.database
-      .from("interpretations")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle()
-  );
-  return (data as Interpretation | null) ?? null;
+  return safeCall<Interpretation | null>("getInterpretationById", { id }, null);
 }
 
 export async function listGenerationJobs(limit = 20) {
-  const data = await safeQuery(() =>
-    cloud.database
-      .from("generation_jobs")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(limit)
+  return safeCall<Array<Record<string, unknown>>>(
+    "listGenerationJobs",
+    { limit },
+    []
   );
-  return (data as Array<Record<string, unknown>> | null) ?? [];
 }
 
 // 生成 slug：中文标题转拼音不可用时退化为时间戳 + 随机

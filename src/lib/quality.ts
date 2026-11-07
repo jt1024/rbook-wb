@@ -69,7 +69,75 @@ export function scoreInterpretation(
   return { score: Math.max(0, Math.min(100, score)), issues };
 }
 
-// 从 LLM 返回文本中解析 JSON（容错处理代码围栏与前后杂文）
+/**
+ * 修复 LLM 常见的「看起来像 JSON、但严格解析会失败」问题：
+ *  - 字符串里出现裸换行 / 制表符
+ *  - 中文正文里出现未转义的半角引号（会把字符串提前闭合）
+ *  - 尾随逗号
+ *  - 流式输出被截断，缺少收尾的 } / ]
+ */
+function repairJson(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  let braces = 0;
+  let brackets = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      if (ch === '"') {
+        // 后面紧跟结构字符才算字符串结束；否则视为正文里的引号并转义
+        const next = text.slice(i + 1).trimStart()[0] ?? "";
+        if (next && ",:}]".includes(next)) {
+          out += ch;
+          inString = false;
+        } else {
+          out += '\\"';
+        }
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+    } else {
+      if (ch === "{") braces++;
+      else if (ch === "}") braces--;
+      else if (ch === "[") brackets++;
+      else if (ch === "]") brackets--;
+      out += ch;
+    }
+  }
+  if (inString) {
+    if (escaped) out = out.slice(0, -1);
+    out += '"';
+  }
+  out += "]".repeat(Math.max(0, brackets));
+  out += "}".repeat(Math.max(0, braces));
+  return out.replace(/,\s*([}\]])/g, "$1");
+}
+
+/** 模型偶尔会漏写属性之间的逗号：在「值结束后换行、下一行是新键」处补一个逗号。 */
+function insertMissingCommas(text: string): string {
+  return text.replace(/("|\}|\])\s*\n(\s*"[^"\n]+"\s*:)/g, "$1,\n$2");
+}
+
+// 从 LLM 返回文本中解析 JSON（容错处理代码围栏、前后杂文与格式破损）
 export function parseInterpretationJSON(raw: string): InterpretationContent {
   let text = raw.trim();
   // 去掉 ```json ... ``` 围栏
@@ -83,7 +151,27 @@ export function parseInterpretationJSON(raw: string): InterpretationContent {
   if (start >= 0 && end > start) {
     text = text.slice(start, end + 1);
   }
-  const parsed = JSON.parse(text) as InterpretationContent;
+
+  // 逐级放宽：原样 → 修复裸引号/裸换行/截断 → 再补漏掉的逗号
+  const candidates = [
+    text,
+    repairJson(text),
+    repairJson(insertMissingCommas(text)),
+    insertMissingCommas(repairJson(text)),
+  ];
+  let parsed: InterpretationContent | null = null;
+  let lastError = "";
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate) as InterpretationContent;
+      break;
+    } catch (e) {
+      lastError = (e as Error).message;
+    }
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`LLM 输出不是合法 JSON：${lastError}`);
+  }
   return {
     summary: parsed.summary ?? "",
     background: parsed.background ?? "",

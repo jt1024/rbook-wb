@@ -1,3 +1,5 @@
+import "server-only";
+
 import { cloud } from "./cloud";
 import { buildUserPrompt, SYSTEM_PROMPT } from "./prompt";
 import { parseInterpretationJSON, scoreInterpretation } from "./quality";

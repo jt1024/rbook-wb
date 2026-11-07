@@ -1,8 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { createWorkBuddyCloud } from "@tencent-ai/workbuddy-cloud-sdk";
-import { publicConfig } from "@/lib/publicConfig";
 import { SESSION_COOKIE, verifySession } from "@/lib/adminSession";
+import { cloud } from "@/lib/cloud";
 
 export const runtime = "nodejs";
 
@@ -54,27 +53,13 @@ export async function POST(req: Request) {
       : {};
 
   try {
-    // SDK 未提供数据库 schema 类型时，rpc 的参数会被推断为 undefined；
-    // 这里只收窄静态类型，运行时对象不变。
-    const cloud = createWorkBuddyCloud({
-      endpoint: publicConfig.endpoint,
-      oauthRelayBaseUrl: publicConfig.oauthRelayBaseUrl,
-      publishableKey: publicConfig.publishableKey,
-    }) as unknown as {
-      database: {
-        rpc: (
-          name: string,
-          params: Record<string, unknown>
-        ) => Promise<{ data: unknown; error: { message?: string } | null }>;
-      };
-    };
-    const result = await cloud.database.rpc("admin_write", {
+    const result = (await cloud.database.rpc("admin_write", {
       p_secret: secret,
       p_table: table,
       p_op: op,
       p_data: body.data,
       p_match: match,
-    });
+    })) as { data: unknown; error: { message?: string } | null };
     if (result.error) {
       const message = result.error?.message ?? String(result.error);
       return NextResponse.json({ error: message }, { status: 500 });

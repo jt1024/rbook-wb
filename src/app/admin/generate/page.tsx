@@ -1,16 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { generateInterpretation, listModels } from "@/lib/ai";
+import { generateInterpretation, listModels, type ModelItem } from "@/lib/aiClient";
 import { adminWrite } from "@/lib/adminDb";
 import { listAudiences, listStyles, listWorks } from "@/lib/queries";
 import type { Audience, Style, Work } from "@/lib/types";
-
-interface ModelItem {
-  id: string;
-  name?: string;
-  disabled?: boolean;
-}
 
 export default function GeneratePage() {
   const [works, setWorks] = useState<Work[]>([]);
@@ -40,7 +34,7 @@ export default function GeneratePage() {
       setAudiences(as);
       try {
         const ms = await listModels();
-        const usable = (ms as ModelItem[]).filter((m) => m.disabled !== true);
+        const usable = ms.filter((m) => m.disabled !== true);
         setModels(usable);
         if (usable[0]) setModelId(usable[0].id);
         else setMsg("当前环境没有可用模型，请联系管理员检查模型目录。");
