@@ -43,6 +43,31 @@ export async function listAudiences(): Promise<Audience[]> {
   return safeCall<Audience[]>("listAudiences", {}, []);
 }
 
+// 后台字典管理：全量（含停用，不含已删除），并带各条目的关联解读数。
+export async function listAllStyles(): Promise<Style[]> {
+  return safeCall<Style[]>("listAllStyles", {}, []);
+}
+
+export async function listAllAudiences(): Promise<Audience[]> {
+  return safeCall<Audience[]>("listAllAudiences", {}, []);
+}
+
+// 风格/人群管理写操作（增、改、停启用、删除）。
+export async function dictWrite(body: Record<string, unknown>): Promise<{ error?: string }> {
+  try {
+    const res = await fetch("/api/admin/dictionaries", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json()) as { error?: string };
+    if (!res.ok) return { error: json.error ?? `操作失败（HTTP ${res.status}）` };
+    return {};
+  } catch (e) {
+    return { error: (e as Error).message ?? "网络错误" };
+  }
+}
+
 export async function listWorks(opts?: {
   status?: string;
   category?: string;

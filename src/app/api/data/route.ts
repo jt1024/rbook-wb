@@ -16,7 +16,7 @@ const PUBLIC_OPS = new Set([
   "listInterpretations",
   "getInterpretationById",
 ]);
-const ADMIN_OPS = new Set(["listGenerationJobs"]);
+const ADMIN_OPS = new Set(["listAllStyles", "listAllAudiences", "listGenerationJobs"]);
 
 type Args = Record<string, unknown>;
 
@@ -100,10 +100,18 @@ export async function POST(req: Request) {
         if (admin) {
           data = list;
         } else {
-          // 避免「已发布解读挂在草稿作品上」导致前台出现孤儿内容
-          const publishedWorks = await db.listWorks({ status: "published" });
-          const ids = new Set(publishedWorks.map((w) => w.id));
-          data = list.filter((i) => ids.has(i.work_id));
+          // 避免「已发布解读挂在草稿作品/停用风格或人群上」导致前台出现孤儿内容
+          const [publishedWorks, activeStyles, activeAudiences] = await Promise.all([
+            db.listWorks({ status: "published" }),
+            db.listStyles(),
+            db.listAudiences(),
+          ]);
+          const workIds = new Set(publishedWorks.map((w) => w.id));
+          const styleIds = new Set(activeStyles.map((s) => s.id));
+          const audIds = new Set(activeAudiences.map((a) => a.id));
+          data = list.filter(
+            (i) => workIds.has(i.work_id) && styleIds.has(i.style_id) && audIds.has(i.audience_id)
+          );
         }
         break;
       }
@@ -115,9 +123,33 @@ export async function POST(req: Request) {
         } else if (admin) {
           data = i;
         } else {
-          const w = await db.getWorkById(i.work_id);
-          data = w?.status === "published" ? i : null;
+          const [w, s, a] = await Promise.all([
+            db.getWorkById(i.work_id),
+            db.listStyles(),
+            db.listAudiences(),
+          ]);
+          const ok =
+            w?.status === "published" &&
+            s.some((x) => x.id === i.style_id) &&
+            a.some((x) => x.id === i.audience_id);
+          data = ok ? i : null;
         }
+        break;
+      }
+      case "listAllStyles": {
+        const [styles, counts] = await Promise.all([
+          db.listStyles({ includeInactive: true }),
+          db.countInterpretationsByDict(),
+        ]);
+        data = styles.map((s) => ({ ...s, interpretation_count: counts.styles[s.id] ?? 0 }));
+        break;
+      }
+      case "listAllAudiences": {
+        const [auds, counts] = await Promise.all([
+          db.listAudiences({ includeInactive: true }),
+          db.countInterpretationsByDict(),
+        ]);
+        data = auds.map((a) => ({ ...a, interpretation_count: counts.audiences[a.id] ?? 0 }));
         break;
       }
       case "listGenerationJobs":

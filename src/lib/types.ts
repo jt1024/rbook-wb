@@ -5,6 +5,9 @@ export interface Style {
   description: string | null;
   prompt_template: string;
   sort_order: number | null;
+  is_active?: boolean;
+  deleted_at?: string | null;
+  interpretation_count?: number;
   created_at?: string;
 }
 
@@ -15,6 +18,9 @@ export interface Audience {
   description: string | null;
   prompt_suffix: string | null;
   sort_order: number | null;
+  is_active?: boolean;
+  deleted_at?: string | null;
+  interpretation_count?: number;
   created_at?: string;
 }
 
