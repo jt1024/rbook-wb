@@ -1,6 +1,5 @@
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, verifySession } from "@/lib/adminSession";
+import { getSessionContext } from "@/lib/adminSession";
 import * as db from "@/lib/serverQueries";
 
 export const runtime = "nodejs";
@@ -59,8 +58,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "不支持的查询操作" }, { status: 400 });
   }
 
-  const store = await cookies();
-  const admin = verifySession(store.get(SESSION_COOKIE)?.value);
+  const admin = await getSessionContext();
   if (ADMIN_OPS.has(op) && !admin) {
     return NextResponse.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   }

@@ -1,38 +1,69 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import "server-only";
 
-// 后台会话：HMAC 签名的自包含 cookie，仅服务端读写。
-// 无状态、无需会话表；过期时间由签名保护，篡改即失效。
+import { cookies } from "next/headers";
+import {
+  authRpc,
+  type AdminRole,
+  type SessionContext,
+} from "./adminAuth";
+import { hashToken } from "./password";
+
+// 会话改为服务端持久化：cookie 只保存随机 token，有效性以数据库记录为准。
+// 因此停用账号、改密、手动吊销都能立即生效，不再需要轮换签名密钥。
 export const SESSION_COOKIE = "rbook_admin";
 export const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 天
 
-function signingKey(): string {
-  return process.env.SESSION_SECRET ?? "";
-}
-
-function sign(payload: string): string {
-  return createHmac("sha256", signingKey()).update(payload).digest("hex");
-}
-
-export function issueSession(): { token: string; maxAge: number } {
-  const payload = Buffer.from(
-    JSON.stringify({ exp: Date.now() + SESSION_MAX_AGE * 1000 })
-  ).toString("base64url");
-  return { token: `${payload}.${sign(payload)}`, maxAge: SESSION_MAX_AGE };
-}
-
-export function verifySession(token: string | undefined | null): boolean {
-  if (!token || !signingKey()) return false;
-  const dot = token.lastIndexOf(".");
-  if (dot <= 0) return false;
-  const payload = token.slice(0, dot);
-  const sig = token.slice(dot + 1);
-  const expected = sign(payload);
-  if (sig.length !== expected.length) return false;
+/**
+ * 读取并校验当前会话。
+ * 匿名请求（无 cookie）直接返回 null，不产生任何数据库调用，前台性能不受影响。
+ */
+export async function getSessionContext(): Promise<SessionContext | null> {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!token) return null;
   try {
-    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
-    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof decoded.exp === "number" && decoded.exp > Date.now();
-  } catch {
-    return false;
+    const res = await authRpc("verify_session", { token_hash: hashToken(token) });
+    if (!res.ok || !res.user_id || !res.role) return null;
+    return {
+      token,
+      sessionId: Number(res.session_id),
+      userId: Number(res.user_id),
+      username: String(res.username ?? ""),
+      displayName: String(res.display_name ?? ""),
+      role: res.role as AdminRole,
+    };
+  } catch (e) {
+    console.error("[auth] verify_session", e);
+    return null;
   }
+}
+
+export async function setSessionCookie(token: string): Promise<void> {
+  const store = await cookies();
+  store.set(SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: SESSION_MAX_AGE,
+  });
+}
+
+export async function clearSessionCookie(): Promise<void> {
+  const store = await cookies();
+  store.set(SESSION_COOKIE, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: 0,
+  });
+}
+
+export async function requireAdmin(): Promise<SessionContext | null> {
+  return getSessionContext();
+}
+
+export async function requireOwner(): Promise<SessionContext | null> {
+  const ctx = await getSessionContext();
+  return ctx?.role === "owner" ? ctx : null;
 }

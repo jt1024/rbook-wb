@@ -1,6 +1,5 @@
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, verifySession } from "@/lib/adminSession";
+import { getSessionContext } from "@/lib/adminSession";
 import { cloud } from "@/lib/cloud";
 
 export const runtime = "nodejs";
@@ -23,8 +22,7 @@ interface WriteRequest {
 }
 
 export async function POST(req: Request) {
-  const store = await cookies();
-  if (!verifySession(store.get(SESSION_COOKIE)?.value)) {
+  if (!(await getSessionContext())) {
     return NextResponse.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   }
 

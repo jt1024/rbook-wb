@@ -1,127 +1,323 @@
-# 安全配置：服务端登录、RLS 与 AI 代理
+# 安全配置：账号体系、RLS 与服务端代理
 
-> 本文说明后台登录、数据库读写代理、AI 调用代理的设计、所需环境变量，以及云端对象如何重建。
+> 本文说明后台多用户账号体系、数据库读写代理、AI 调用代理的设计、所需环境变量，以及云端对象如何重建。
 > 所有密钥都**不进代码仓库**；仓库内只保留带占位符的模板。
 
 ## 一、分层设计
 
 ```
-浏览器（不持有任何云凭证）
-  ├─ 读数据：POST /api/data ───────────┐
-  ├─ 登录：  POST /api/admin/login     │  服务端（Node.js）
-  ├─ 写数据：POST /api/admin/db  ─────┼→ 校验 httpOnly 会话 cookie
-  └─ AI：    /api/ai/{models,generate,search}
-                                       ├→ 云 SDK 直连数据库 / LLM 网关
+浏览器（不持有任何云凭证、不持有密码哈希）
+  ├─ 读数据：POST /api/data ─────────────┐
+  ├─ 登录：  POST /api/admin/login      │
+  ├─ 会话：  /api/admin/{session,logout,accounts,sessions}
+  ├─ 写数据：POST /api/admin/db ────────┼→ 服务端校验数据库会话
+  └─ AI：    /api/ai/{models,generate,search}    │
+                                       ├→ 云 SDK 调用 admin_write / admin_auth / LLM
                                        └→ 匿名访问强制只看已发布内容
 ```
 
-- 口令只存在于服务端 `ADMIN_PASSWORD`，前端 bundle 里没有任何口令。
-- 云服务的 `endpoint` / `publishableKey` 也已从前端源码移到服务端环境变量；浏览器只访问本站 `/api/*`，不再直连数据库或 LLM 网关。
-- 会话 cookie：`HMAC-SHA256` 签名，含过期时间，`httpOnly` + `sameSite=strict`，默认 7 天。
+- 云服务的 `endpoint` / `publishableKey` 只在服务端环境变量；浏览器只访问本站 `/api/*`。
+- **账号与会话**：`admin_users` / `admin_sessions` 是 server-only 表——开启 RLS、不建任何策略、不向 `anon` / `authenticated` 授权，只能通过 `SECURITY DEFINER` 函数 `public.admin_auth()` 访问。匿名直读返回 `42501 permission denied`。
+- **密码**：`scrypt(N=2^14, r=8, p=1)` + 每账号 16 字节随机盐，格式 `scrypt$N$r$p$salt$hash`；数据库不存明文，前端 bundle 不含任何口令。登录失败 5 次锁定 15 分钟，并叠加按 IP 的进程内限流；账号不存在时也执行一次等价 scrypt 运算，避免响应时间枚举用户名。
+- **会话**：cookie 里是 256 位随机 token（`httpOnly` + `sameSite=strict`，7 天），数据库只存 `sha256(token)`。每次请求都查库确认「未过期、未吊销、账号仍启用」，因此停用账号、改密、手动吊销**立即生效**，不再需要轮换签名密钥。
 - `/api/data` 是只读白名单代理：匿名请求强制过滤 `status='published'`，且剔除挂在未发布作品上的解读；`generation_jobs` 等后台数据要求登录态。
-- `/api/ai/*` 全部要求登录态并带进程内限流；模型成功率统计与全文检索缓存放在服务端（`.data/ai-search-state.json`，重启不丢失）。
-- 数据库 5 张表（works / styles / audiences / interpretations / generation_jobs）的 RLS 策略**只有 SELECT**，匿名与登录用户都无法直接 INSERT/UPDATE/DELETE。
-- 唯一的写入口是 `SECURITY DEFINER` 函数 `public.admin_write()`，它校验服务端密钥后才执行，且对表名、操作类型、列名做白名单校验。
+- `/api/ai/*` 全部要求登录态并带进程内限流；模型成功率统计与全文检索缓存放在服务端（`.data/ai-search-state.json`）。
+- 内容表（works / styles / audiences / interpretations / generation_jobs）的 RLS **只有 SELECT**；唯一写入口是校验服务端密钥的 `public.admin_write()`。
 
-注意：会话是自包含签名 cookie，无服务端吊销列表。退出登录会删除浏览器 cookie；已复制出去的 cookie 在过期前仍然有效，因此请保持 `SESSION_SECRET` 私密，必要时轮换密钥即可让所有旧会话立即失效。
+## 二、角色与权限
 
-## 二、环境变量
+| 角色 | 内容读写 / AI 生成 | 修改自己密码 | 查看自己会话 | 账号管理 / 吊销任意会话 |
+|---|---|---|---|---|
+| `owner` 超级管理员 | ✓ | ✓ | ✓ | ✓ |
+| `admin` 管理员 | ✓ | ✓ | ✓ | ✗ |
+| `editor` 编辑 | ✓ | ✓ | ✓ | ✗ |
+
+保护规则：必须保留至少一个启用状态的 `owner`；不能停用自己的账号、不能删除自己；改密 / 停用会吊销该账号的全部会话（含当前）。首个 owner 由 `ADMIN_USERNAME` + `ADMIN_PASSWORD` 在账号表为空时自动创建，云端函数保证「表内已有账号即拒绝」，且调用需要服务端私有密钥，因此**不是公开注册入口**。
+
+## 三、环境变量
 
 复制 `.env.example` 为 `.env.local`（已被 `.gitignore` 排除）：
 
 | 变量 | 用途 | 生成方式 |
 |---|---|---|
-| `ADMIN_PASSWORD` | 后台登录口令 | 自定义强口令，不写进任何代码文件 |
-| `SESSION_SECRET` | 会话 cookie 签名密钥 | `openssl rand -hex 32` |
-| `ADMIN_DB_SECRET` | 服务端调用 `admin_write()` 的密钥 | `openssl rand -hex 32`，需与云端函数内的哈希对应 |
+| `ADMIN_USERNAME` | 首个 owner 的用户名 | 3–40 位小写字母/数字/`.` `_` `-`，默认 `admin` |
+| `ADMIN_PASSWORD` | 首个 owner 的**初始**口令 | 至少 10 位；建号后登录以数据库为准 |
+| `ADMIN_DB_SECRET` | 服务端调用 `admin_write()` / `admin_auth()` 的密钥 | `openssl rand -hex 32`，需与云端函数内的哈希对应 |
 | `CLOUD_ENDPOINT` | 云服务数据面地址 | 云服务开通时返回 |
 | `CLOUD_PUBLISHABLE_KEY` | 云服务 publishable key | `wbpk_` 开头，仅服务端使用 |
-| `CLOUD_OAUTH_RELAY_BASE_URL` | OAuth relay 地址 | 可选，默认官方地址 |
-| `CLOUD_RESOURCE_ID` | 资源 ID | 可选，留档用 |
+| `CLOUD_OAUTH_RELAY_BASE_URL` | OAuth relay 地址 | 可选 |
+| `CLOUD_RESOURCE_ID` | 资源 ID | 可选 |
+| `SITE_URL` | 站点规范地址 | 影响 canonical / sitemap / JSON-LD |
 
 云端函数里存的是 `ADMIN_DB_SECRET` 的 **MD5 哈希**，不是明文：
 `printf '%s' "$ADMIN_DB_SECRET" | md5 -q`
 
-## 三、云端对象（一次性配置）
+> 旧版自包含签名 cookie 使用的 `SESSION_SECRET` 已不再需要。轮换 `ADMIN_DB_SECRET` 时，必须同时重建 `admin_write()` 与 `admin_auth()` 里的哈希。
 
-以下 SQL 通过云服务的数据库管理通道以 `migrate` 模式执行。把 `__MD5_OF_ADMIN_DB_SECRET__` 替换为上一步得到的哈希。
+## 四、云端对象（一次性配置）
 
-**1. 收紧 RLS（幂等）**
+以下 SQL 通过云服务的数据库管理通道以 `migrate` 模式执行，**每条语句单独一次调用**。把 `__MD5_OF_ADMIN_DB_SECRET__` 替换为上一节得到的哈希。
+
+**1. 建表（每条一句）**
 
 ```sql
-DO $$
-DECLARE t text;
-BEGIN
-  FOREACH t IN ARRAY ARRAY['works','styles','audiences','interpretations','generation_jobs'] LOOP
-    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_all', t);
-    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_read', t);
-    EXECUTE format('CREATE POLICY %I ON public.%I FOR SELECT TO anon, authenticated USING (true)', t || '_read', t);
-  END LOOP;
-END $$;
+CREATE TABLE public.admin_users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, username TEXT NOT NULL UNIQUE CHECK (username ~ '^[a-z0-9_.-]{3,40}$'), password_hash TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'editor' CHECK (role IN ('owner','admin','editor')), is_active BOOLEAN NOT NULL DEFAULT true, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TIMESTAMPTZ, last_login_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())
 ```
 
-**2. 创建特权写函数**
+```sql
+CREATE TABLE public.admin_sessions (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, user_id BIGINT NOT NULL REFERENCES public.admin_users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ, ip TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '')
+```
 
 ```sql
-CREATE OR REPLACE FUNCTION public.admin_write(
-  p_secret text, p_table text, p_op text, p_data jsonb, p_match jsonb DEFAULT '{}'::jsonb
-) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
+CREATE INDEX admin_sessions_user_idx ON public.admin_sessions (user_id, revoked_at)
+```
+
+**2. 隔离（每条一句）**
+
+```sql
+ALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY
+```
+
+```sql
+ALTER TABLE public.admin_sessions ENABLE ROW LEVEL SECURITY
+```
+
+```sql
+REVOKE ALL ON TABLE public.admin_users, public.admin_sessions FROM PUBLIC, anon, authenticated
+```
+
+**3. 账号特权函数**（`bootstrap` / `get_user` / `login_result` / `create_session` / `verify_session` / `revoke_session` / `revoke_user_sessions` / `list_sessions` / `list_users` / `create_user` / `update_user` / `set_password` / `delete_user`）
+
+```sql
+CREATE OR REPLACE FUNCTION public.admin_auth(
+  p_secret text, p_action text, p_payload jsonb DEFAULT '{}'::jsonb
+) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = public, pg_temp AS $fn$
 DECLARE
-  v_sql text; v_result jsonb;
-  v_cols text[] := ARRAY[]::text[]; v_vals text[] := ARRAY[]::text[];
-  v_sets text[] := ARRAY[]::text[]; v_conds text[] := ARRAY[]::text[];
-  v_key text; v_val text;
+  v_user public.admin_users%ROWTYPE;
+  v_row jsonb;
+  v_rows jsonb;
+  v_id bigint;
+  v_actor bigint;
+  v_actor_role text;
+  v_uname text;
+  v_hash text;
+  v_role text;
+  v_active boolean;
+  v_display text;
+  v_token text;
+  v_success boolean;
+  v_cnt integer;
 BEGIN
-  IF md5(COALESCE(p_secret,'')) <> '__MD5_OF_ADMIN_DB_SECRET__' THEN
-    RAISE EXCEPTION 'admin_write: unauthorized';
+  IF md5(coalesce(p_secret,'')) <> '__MD5_OF_ADMIN_DB_SECRET__' THEN
+    RETURN jsonb_build_object('ok',false,'error','unauthorized');
   END IF;
-  IF p_table NOT IN ('works','styles','audiences','interpretations','generation_jobs') THEN
-    RAISE EXCEPTION 'admin_write: invalid table';
-  END IF;
-  IF p_op NOT IN ('insert','update','delete') THEN
-    RAISE EXCEPTION 'admin_write: invalid op';
-  END IF;
-  FOR v_key, v_val IN SELECT key, value FROM jsonb_each_text(p_data) LOOP
-    IF v_key !~ '^[a-z_][a-z0-9_]*$' THEN RAISE EXCEPTION 'admin_write: invalid column'; END IF;
-    v_cols := array_append(v_cols, quote_ident(v_key));
-    v_vals := array_append(v_vals, quote_nullable(v_val));
-    v_sets := array_append(v_sets, quote_ident(v_key) || ' = ' || quote_nullable(v_val));
-  END LOOP;
-  FOR v_key, v_val IN SELECT key, value FROM jsonb_each_text(p_match) LOOP
-    IF v_key !~ '^[a-z_][a-z0-9_]*$' THEN RAISE EXCEPTION 'admin_write: invalid column'; END IF;
-    v_conds := array_append(v_conds, quote_ident(v_key) || ' = ' || quote_nullable(v_val));
-  END LOOP;
-  IF p_op = 'insert' THEN
-    IF array_length(v_cols,1) IS NULL THEN RAISE EXCEPTION 'admin_write: empty data'; END IF;
-    v_sql := 'INSERT INTO public.' || quote_ident(p_table) || ' (' || array_to_string(v_cols,', ')
-             || ') VALUES (' || array_to_string(v_vals,', ') || ') RETURNING to_jsonb('
-             || quote_ident(p_table) || ') AS r';
-  ELSIF p_op = 'update' THEN
-    IF array_length(v_sets,1) IS NULL OR array_length(v_conds,1) IS NULL THEN
-      RAISE EXCEPTION 'admin_write: data and match required';
+  v_uname := lower(btrim(coalesce(p_payload->>'username','')));
+  v_hash := coalesce(p_payload->>'password_hash','');
+  v_token := coalesce(p_payload->>'token_hash','');
+  v_id := NULLIF(p_payload->>'user_id','')::bigint;
+  v_actor := NULLIF(p_payload->>'actor_user_id','')::bigint;
+  v_actor_role := coalesce(p_payload->>'actor_role','');
+  v_success := (p_payload->>'success') = 'true';
+
+  IF p_action = 'bootstrap' THEN
+    IF EXISTS (SELECT 1 FROM public.admin_users) THEN
+      RETURN jsonb_build_object('ok',false,'error','already_initialized');
     END IF;
-    v_sql := 'UPDATE public.' || quote_ident(p_table) || ' SET ' || array_to_string(v_sets,', ')
-             || ' WHERE ' || array_to_string(v_conds,' AND ') || ' RETURNING to_jsonb('
-             || quote_ident(p_table) || ') AS r';
-  ELSE
-    IF array_length(v_conds,1) IS NULL THEN RAISE EXCEPTION 'admin_write: match required'; END IF;
-    v_sql := 'DELETE FROM public.' || quote_ident(p_table) || ' WHERE ' || array_to_string(v_conds,' AND ')
-             || ' RETURNING to_jsonb(' || quote_ident(p_table) || ') AS r';
+    IF v_uname !~ '^[a-z0-9_.-]{3,40}$' OR v_hash = '' THEN
+      RETURN jsonb_build_object('ok',false,'error','invalid_input');
+    END IF;
+    INSERT INTO public.admin_users AS t (username,password_hash,display_name,role)
+    VALUES (v_uname,v_hash,coalesce(p_payload->>'display_name','管理员'),'owner')
+    RETURNING to_jsonb(t) - 'password_hash' INTO v_row;
+    RETURN jsonb_build_object('ok',true,'user',v_row);
   END IF;
-  EXECUTE 'WITH q AS (' || v_sql || ') SELECT COALESCE(jsonb_agg(r), ''[]''::jsonb) FROM q' INTO v_result;
-  RETURN v_result;
+
+  IF p_action = 'get_user' THEN
+    SELECT * INTO v_user FROM public.admin_users WHERE username = v_uname;
+    IF NOT FOUND THEN RETURN jsonb_build_object('ok',false,'error','user_not_found'); END IF;
+    RETURN jsonb_build_object('ok',true,'user',to_jsonb(v_user));
+  END IF;
+
+  IF p_action = 'login_result' THEN
+    UPDATE public.admin_users SET
+      failed_attempts = CASE WHEN v_success THEN 0 ELSE failed_attempts + 1 END,
+      locked_until = CASE WHEN v_success THEN NULL
+                          WHEN failed_attempts + 1 >= 5 THEN now() + interval '15 minutes'
+                          ELSE locked_until END,
+      last_login_at = CASE WHEN v_success THEN now() ELSE last_login_at END,
+      updated_at = now()
+    WHERE id = v_id;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  IF p_action = 'create_session' THEN
+    DELETE FROM public.admin_sessions WHERE expires_at < now() - interval '1 day';
+    INSERT INTO public.admin_sessions AS t (token_hash,user_id,expires_at,ip,user_agent)
+    VALUES (v_token,v_id,(p_payload->>'expires_at')::timestamptz,
+            coalesce(p_payload->>'ip',''),coalesce(p_payload->>'user_agent',''))
+    RETURNING to_jsonb(t) - 'token_hash' INTO v_row;
+    RETURN jsonb_build_object('ok',true,'session',v_row);
+  END IF;
+
+  IF p_action = 'verify_session' THEN
+    SELECT jsonb_build_object('ok',true,'session_id',s.id,'user_id',u.id,
+             'username',u.username,'display_name',u.display_name,'role',u.role)
+      INTO v_row
+      FROM public.admin_sessions s JOIN public.admin_users u ON u.id = s.user_id
+     WHERE s.token_hash = v_token AND s.revoked_at IS NULL
+       AND s.expires_at > now() AND u.is_active = true;
+    IF v_row IS NULL THEN
+      RETURN jsonb_build_object('ok',false,'error','invalid_session');
+    END IF;
+    UPDATE public.admin_sessions SET last_seen_at = now() WHERE token_hash = v_token;
+    RETURN v_row;
+  END IF;
+
+  IF p_action = 'revoke_session' THEN
+    IF v_token <> '' THEN
+      UPDATE public.admin_sessions SET revoked_at = now()
+       WHERE token_hash = v_token AND revoked_at IS NULL;
+    ELSIF NULLIF(p_payload->>'session_id','') IS NOT NULL THEN
+      UPDATE public.admin_sessions SET revoked_at = now()
+       WHERE id = (p_payload->>'session_id')::bigint AND revoked_at IS NULL
+         AND (v_actor_role = 'owner' OR user_id = v_actor);
+    END IF;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  IF p_action = 'revoke_user_sessions' THEN
+    UPDATE public.admin_sessions SET revoked_at = now()
+     WHERE user_id = v_id AND revoked_at IS NULL;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  IF p_action = 'list_sessions' THEN
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+             'id',s.id,'user_id',s.user_id,'username',u.username,
+             'created_at',s.created_at,'expires_at',s.expires_at,
+             'last_seen_at',s.last_seen_at,'revoked_at',s.revoked_at,
+             'ip',s.ip,'user_agent',s.user_agent,'current',s.token_hash = v_token
+           ) ORDER BY s.created_at DESC), '[]'::jsonb)
+      INTO v_rows
+      FROM public.admin_sessions s JOIN public.admin_users u ON u.id = s.user_id
+     WHERE v_actor_role = 'owner' OR s.user_id = v_actor;
+    RETURN jsonb_build_object('ok',true,'sessions',v_rows);
+  END IF;
+
+  IF p_action = 'list_users' THEN
+    IF v_actor_role <> 'owner' THEN
+      RETURN jsonb_build_object('ok',false,'error','forbidden');
+    END IF;
+    SELECT coalesce(jsonb_agg(to_jsonb(u) - 'password_hash' ORDER BY u.id), '[]'::jsonb)
+      INTO v_rows FROM public.admin_users u;
+    RETURN jsonb_build_object('ok',true,'users',v_rows);
+  END IF;
+
+  IF p_action = 'create_user' THEN
+    IF v_actor_role <> 'owner' THEN
+      RETURN jsonb_build_object('ok',false,'error','forbidden');
+    END IF;
+    IF v_uname !~ '^[a-z0-9_.-]{3,40}$' OR v_hash = '' THEN
+      RETURN jsonb_build_object('ok',false,'error','invalid_input');
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.admin_users WHERE username = v_uname) THEN
+      RETURN jsonb_build_object('ok',false,'error','username_taken');
+    END IF;
+    v_role := coalesce(p_payload->>'role','editor');
+    IF v_role NOT IN ('owner','admin','editor') THEN
+      RETURN jsonb_build_object('ok',false,'error','invalid_role');
+    END IF;
+    INSERT INTO public.admin_users AS t (username,password_hash,display_name,role)
+    VALUES (v_uname,v_hash,coalesce(p_payload->>'display_name',v_uname),v_role)
+    RETURNING to_jsonb(t) - 'password_hash' INTO v_row;
+    RETURN jsonb_build_object('ok',true,'user',v_row);
+  END IF;
+
+  IF p_action IN ('update_user','set_password','delete_user') THEN
+    SELECT * INTO v_user FROM public.admin_users WHERE id = v_id;
+    IF NOT FOUND THEN RETURN jsonb_build_object('ok',false,'error','user_not_found'); END IF;
+  END IF;
+
+  IF p_action = 'update_user' THEN
+    IF v_actor_role <> 'owner' THEN
+      RETURN jsonb_build_object('ok',false,'error','forbidden');
+    END IF;
+    IF v_id = v_actor AND (p_payload->>'is_active') = 'false' THEN
+      RETURN jsonb_build_object('ok',false,'error','cannot_disable_self');
+    END IF;
+    v_role := coalesce(NULLIF(p_payload->>'role',''),v_user.role);
+    v_active := CASE WHEN p_payload ? 'is_active'
+                     THEN (p_payload->>'is_active') = 'true' ELSE v_user.is_active END;
+    v_display := coalesce(NULLIF(p_payload->>'display_name',''),v_user.display_name);
+    IF v_role NOT IN ('owner','admin','editor') THEN
+      RETURN jsonb_build_object('ok',false,'error','invalid_role');
+    END IF;
+    IF v_user.role = 'owner' AND (v_role <> 'owner' OR NOT v_active) THEN
+      SELECT count(*) INTO v_cnt FROM public.admin_users
+       WHERE role = 'owner' AND is_active = true;
+      IF v_cnt <= 1 THEN RETURN jsonb_build_object('ok',false,'error','last_owner'); END IF;
+    END IF;
+    UPDATE public.admin_users SET role = v_role, is_active = v_active,
+      display_name = v_display, updated_at = now() WHERE id = v_id;
+    IF NOT v_active THEN
+      UPDATE public.admin_sessions SET revoked_at = now()
+       WHERE user_id = v_id AND revoked_at IS NULL;
+    END IF;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  IF p_action = 'set_password' THEN
+    IF v_hash = '' THEN RETURN jsonb_build_object('ok',false,'error','invalid_input'); END IF;
+    IF v_actor_role <> 'owner' AND v_actor IS DISTINCT FROM v_id THEN
+      RETURN jsonb_build_object('ok',false,'error','forbidden');
+    END IF;
+    UPDATE public.admin_users SET password_hash = v_hash,
+      failed_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = v_id;
+    UPDATE public.admin_sessions SET revoked_at = now()
+     WHERE user_id = v_id AND revoked_at IS NULL;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  IF p_action = 'delete_user' THEN
+    IF v_actor_role <> 'owner' THEN
+      RETURN jsonb_build_object('ok',false,'error','forbidden');
+    END IF;
+    IF v_id = v_actor THEN
+      RETURN jsonb_build_object('ok',false,'error','cannot_delete_self');
+    END IF;
+    IF v_user.role = 'owner' THEN
+      SELECT count(*) INTO v_cnt FROM public.admin_users
+       WHERE role = 'owner' AND is_active = true;
+      IF v_cnt <= 1 THEN RETURN jsonb_build_object('ok',false,'error','last_owner'); END IF;
+    END IF;
+    DELETE FROM public.admin_users WHERE id = v_id;
+    RETURN jsonb_build_object('ok',true);
+  END IF;
+
+  RETURN jsonb_build_object('ok',false,'error','unknown_action');
 END
 $fn$;
 ```
 
-## 四、部署清单
+**4. 内容表 RLS 与 `admin_write()`**：保持上一版配置不变（5 张表只有 `SELECT` 策略 + 特权写函数），此处不再重复。
 
-1. 在部署环境配置上表三个环境变量（不要提交 `.env.local`）。
-2. 更换 `ADMIN_DB_SECRET` 时，必须同步重建函数里的 MD5 哈希，否则后台写入会报 `unauthorized`。
-3. 轮换 `SESSION_SECRET` 会让所有已签发的会话立即失效。
-4. 部署后自检：匿名直接调用数据库写接口应返回空结果/被拒；未登录调用 `/api/admin/db` 应返回 401；登录后写一条数据应成功。
+## 五、部署与自检清单
 
-## 五、已知边界
+1. 配置上表环境变量；首个 owner 会在第一次登录时自动创建。
+2. 登录后立刻在「账号与会话」修改初始密码，并为每位协作者单独建号。
+3. 自检：
+   - 匿名直接查 `admin_users` → `42501`；
+   - 未登录调用 `/api/ai/*`、`/api/admin/db`、`/api/admin/accounts` → `401`；
+   - `editor` 调用账号管理 → `403`；
+   - 吊销某条会话后，用该 cookie 再请求 → `401`；
+   - 连续 5 次错误密码 → `423` 锁定。
+4. 需要全员下线时：owner 在后台点「吊销全部会话」，或轮换 `ADMIN_DB_SECRET`（会同时影响内容写入函数，需同步更新云端哈希）。
 
-- 这是**单管理员口令**方案，不是多用户账号体系（二期接入正式 Auth）。
-- LLM 网关仍可由匿名前端直接调用（用于 AI 检索与解读生成），如需防止额度滥用，应把 LLM 调用也收拢到服务端代理。
+## 六、已知边界
+
+- 这是**后台多用户账号体系**，前台读者仍无需注册登录（内容站无用户内容）。
+- 没有邮件/手机找回密码、邮箱验证与 MFA；密码重置由 `owner` 在后台完成。
+- 登录限流是进程内滑动窗口，多实例部署时每个实例各自计数；账号级锁定在数据库，跨实例生效。
+- 会话校验每次请求查一次数据库；匿名请求（无 cookie）零数据库开销。
+- 云端 `admin_auth()` 与 `admin_write()` 共用同一个服务端密钥，靠密钥 + action/表/列白名单防护。
