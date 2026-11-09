@@ -1,68 +1,144 @@
-"use client";
-
-import { useEffect, useState } from "react";
+import { cache } from "react";
+import type { Metadata } from "next";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { notFound } from "next/navigation";
+import { JsonLd } from "@/components/JsonLd";
 import {
   getInterpretationById,
   getWorkById,
   listAudiences,
   listStyles,
-} from "@/lib/queries";
+} from "@/lib/serverQueries";
+import {
+  articleJsonLd,
+  breadcrumbJsonLd,
+  buildMetadata,
+} from "@/lib/seo";
 import { formatBookTitle } from "@/lib/types";
-import type { Audience, Interpretation, Style, Work } from "@/lib/types";
 
-export default function InterpretationPage() {
-  const { id } = useParams<{ id: string }>();
-  const [interp, setInterp] = useState<Interpretation | null>(null);
-  const [work, setWork] = useState<Work | null>(null);
-  const [style, setStyle] = useState<Style | null>(null);
-  const [audience, setAudience] = useState<Audience | null>(null);
-  const [loading, setLoading] = useState(true);
+export const dynamic = "force-dynamic";
 
-  useEffect(() => {
-    if (!id) return;
-    (async () => {
-      const i = await getInterpretationById(Number(id));
-      setInterp(i);
-      if (i) {
-        const [w, ss, as] = await Promise.all([
-          getWorkById(i.work_id),
-          listStyles(),
-          listAudiences(),
-        ]);
-        setWork(w);
-        setStyle(ss.find((s) => s.id === i.style_id) ?? null);
-        setAudience(as.find((a) => a.id === i.audience_id) ?? null);
-      }
-      setLoading(false);
-    })();
-  }, [id]);
+const loadInterpretation = cache(async (id: number) =>
+  getInterpretationById(id)
+);
 
-  if (loading) {
-    return <div className="py-20 text-center text-[var(--muted)]">加载中…</div>;
+function summaryOf(interp: {
+  summary: string | null;
+  structured_content: { summary?: string } | null;
+}): string {
+  return interp.summary?.trim() || interp.structured_content?.summary?.trim() || "";
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const numId = Number(id);
+  if (!Number.isInteger(numId) || numId <= 0) {
+    return buildMetadata({
+      title: "解读不存在",
+      description: "该解读尚未发布或链接已失效。",
+      path: `/interpretations/${id}`,
+      noIndex: true,
+    });
   }
+
+  const interp = await loadInterpretation(numId);
   if (!interp || interp.status !== "published") {
-    return <div className="py-20 text-center text-[var(--muted)]">解读不存在或未发布。</div>;
+    return buildMetadata({
+      title: "解读不存在",
+      description: "该解读尚未发布或链接已失效。",
+      path: `/interpretations/${id}`,
+      noIndex: true,
+    });
   }
 
+  const [work, styles] = await Promise.all([getWorkById(interp.work_id), listStyles()]);
+  const style = styles.find((s) => s.id === interp.style_id);
+  const title =
+    interp.title ||
+    `${style?.name ?? "经典"}解读《${work?.title ?? "作品"}》`;
+  const description =
+    summaryOf(interp) ||
+    `${title}：背景梳理、逐段精读、金句与延伸书单。`;
+
+  return buildMetadata({
+    title,
+    description,
+    path: `/interpretations/${interp.id}`,
+    type: "article",
+    publishedTime: interp.created_at,
+    modifiedTime: interp.updated_at,
+    authors: [work?.author ?? "佚名"],
+    keywords: [
+      work?.title ?? "",
+      style?.name ?? "",
+      "经典解读",
+      "逐段精读",
+      "金句",
+    ],
+  });
+}
+
+export default async function InterpretationPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const numId = Number(id);
+  if (!Number.isInteger(numId) || numId <= 0) notFound();
+
+  const interp = await loadInterpretation(numId);
+  if (!interp || interp.status !== "published") notFound();
+
+  const [work, styles, audiences] = await Promise.all([
+    getWorkById(interp.work_id),
+    listStyles(),
+    listAudiences(),
+  ]);
+  if (!work || work.status !== "published") notFound();
+
+  const style = styles.find((s) => s.id === interp.style_id) ?? null;
+  const audience = audiences.find((a) => a.id === interp.audience_id) ?? null;
   const c = interp.structured_content;
+  const pageTitle =
+    interp.title || `${style?.name ?? "经典"}解读《${work.title}》`;
+  const description = summaryOf(interp) || `${pageTitle}：逐段精读与延伸书单。`;
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-10">
+      <JsonLd
+        data={[
+          breadcrumbJsonLd([
+            { name: "首页", path: "/" },
+            { name: "作品库", path: "/works" },
+            { name: `《${work.title}》`, path: `/works/${work.slug}` },
+            { name: pageTitle },
+          ]),
+          articleJsonLd({
+            title: pageTitle,
+            description,
+            path: `/interpretations/${interp.id}`,
+            authorType: "Organization",
+            publishedTime: interp.created_at,
+            modifiedTime: interp.updated_at,
+            section: work.category,
+          }),
+        ]}
+      />
+
       {/* 面包屑 */}
       <div className="text-xs text-[var(--muted)] mb-6">
         <Link href="/works" className="hover:text-[var(--accent)]">
           作品库
         </Link>
-        {work && (
-          <>
-            {" / "}
-            <Link href={`/works/${work.slug}`} className="hover:text-[var(--accent)]">
-              《{work.title}》
-            </Link>
-          </>
-        )}
+        {" / "}
+        <Link href={`/works/${work.slug}`} className="hover:text-[var(--accent)]">
+          《{work.title}》
+        </Link>
       </div>
 
       {/* 头部 */}
@@ -80,13 +156,11 @@ export default function InterpretationPage() {
           )}
         </div>
         <h1 className="font-serif-read text-3xl md:text-4xl font-bold leading-snug">
-          {interp.title || `${style?.name ?? ""}解读《${work?.title ?? ""}》`}
+          {pageTitle}
         </h1>
-        {work && (
-          <p className="mt-3 text-sm text-[var(--muted)]">
-            原作：{work.author ?? "佚名"}《{work.title}》
-          </p>
-        )}
+        <p className="mt-3 text-sm text-[var(--muted)]">
+          原作：{work.author ?? "佚名"}《{work.title}》
+        </p>
       </header>
 
       {c && (
@@ -158,16 +232,14 @@ export default function InterpretationPage() {
       )}
 
       {/* 返回 */}
-      {work && (
-        <div className="mt-12 text-center">
-          <Link
-            href={`/works/${work.slug}`}
-            className="inline-block px-6 py-2.5 rounded-full border border-[var(--border)] text-sm hover:border-[var(--accent)] transition-colors"
-          >
-            ← 查看《{work.title}》的更多解读
-          </Link>
-        </div>
-      )}
+      <div className="mt-12 text-center">
+        <Link
+          href={`/works/${work.slug}`}
+          className="inline-block px-6 py-2.5 rounded-full border border-[var(--border)] text-sm hover:border-[var(--accent)] transition-colors"
+        >
+          ← 查看《{work.title}》的更多解读
+        </Link>
+      </div>
     </div>
   );
 }

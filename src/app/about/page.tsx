@@ -1,12 +1,27 @@
 import type { Metadata } from "next";
+import { JsonLd } from "@/components/JsonLd";
+import { absoluteUrl, buildMetadata, SITE_NAME } from "@/lib/seo";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = buildMetadata({
   title: "关于本站",
-};
+  description:
+    "了解「经典解读」的内容理念：原文与解读分离收录、多风格与多受众组合、AI 生成加人工审核的发布流程，以及版权说明。",
+  path: "/about",
+  keywords: ["关于本站", "经典解读", "版权说明", "内容理念"],
+});
 
 export default function AboutPage() {
   return (
     <div className="max-w-3xl mx-auto px-4 py-12">
+      <JsonLd
+        data={{
+          "@context": "https://schema.org",
+          "@type": "AboutPage",
+          name: `关于「${SITE_NAME}」`,
+          url: absoluteUrl("/about"),
+          inLanguage: "zh-CN",
+        }}
+      />
       <h1 className="font-serif-read text-3xl font-bold mb-8">关于「经典解读」</h1>
       <div className="space-y-6 text-[15px] leading-loose text-[var(--foreground)]">
         <p>

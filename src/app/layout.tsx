@@ -1,14 +1,60 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import { JsonLd } from "@/components/JsonLd";
+import {
+  DEFAULT_DESCRIPTION,
+  SITE_NAME,
+  SITE_URL,
+  websiteJsonLd,
+} from "@/lib/seo";
 import "./globals.css";
 
+const homeTitle = `${SITE_NAME} · 把经典读出味道来`;
+
 export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
   title: {
-    default: "经典解读 · 把经典读出味道来",
-    template: "%s | 经典解读",
+    default: homeTitle,
+    template: `%s | ${SITE_NAME}`,
   },
-  description:
-    "经典文章与书籍的人格化深读平台：同一篇经典，不同风格的解读，面向不同读者的深阅读体验。",
+  description: DEFAULT_DESCRIPTION,
+  applicationName: SITE_NAME,
+  keywords: [
+    "经典解读",
+    "名著解读",
+    "课文精读",
+    "逐段精读",
+    "现代散文",
+    "延伸阅读",
+  ],
+  category: "education",
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website",
+    url: SITE_URL,
+    siteName: SITE_NAME,
+    title: homeTitle,
+    description: DEFAULT_DESCRIPTION,
+    locale: "zh_CN",
+  },
+  twitter: {
+    card: "summary",
+    title: homeTitle,
+    description: DEFAULT_DESCRIPTION,
+  },
+  robots: {
+    index: true,
+    follow: true,
+    "max-image-preview": "large",
+    "max-snippet": -1,
+    "max-video-preview": -1,
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#faf8f3",
 };
 
 const navItems = [
@@ -26,6 +72,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="min-h-screen flex flex-col antialiased">
+        <JsonLd data={websiteJsonLd()} />
         <header className="border-b border-[var(--border)] bg-[var(--card)]">
           <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
             <Link href="/" className="font-serif-read text-xl font-bold tracking-wide">

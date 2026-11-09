@@ -1,32 +1,52 @@
-"use client";
-
-import { useEffect, useState } from "react";
+import type { Metadata } from "next";
 import Link from "next/link";
-import { listInterpretations, listStyles, listWorks } from "@/lib/queries";
-import type { Interpretation, Style, Work } from "@/lib/types";
+import { JsonLd } from "@/components/JsonLd";
+import {
+  listInterpretations,
+  listStyles,
+  listWorks,
+} from "@/lib/serverQueries";
+import {
+  DEFAULT_DESCRIPTION,
+  buildMetadata,
+  itemListJsonLd,
+} from "@/lib/seo";
 
-export default function HomePage() {
-  const [works, setWorks] = useState<Work[]>([]);
-  const [styles, setStyles] = useState<Style[]>([]);
-  const [interps, setInterps] = useState<Interpretation[]>([]);
-  const [loading, setLoading] = useState(true);
+export const dynamic = "force-dynamic";
 
-  useEffect(() => {
-    (async () => {
-      const [ws, ss, is] = await Promise.all([
-        listWorks({ status: "published", limit: 8 }),
-        listStyles(),
-        listInterpretations({ status: "published" }),
-      ]);
-      setWorks(ws);
-      setStyles(ss);
-      setInterps(is.slice(0, 6));
-      setLoading(false);
-    })();
-  }, []);
+const HOME_TITLE = "经典解读 · 把经典读出味道来";
+
+export const metadata: Metadata = {
+  ...buildMetadata({
+    title: HOME_TITLE,
+    description: DEFAULT_DESCRIPTION,
+    path: "/",
+    keywords: ["经典解读", "名著解读", "课文精读", "多风格解读"],
+  }),
+  // 首页用绝对标题，避免被根布局的 template 拼成「… | 经典解读」重复站名。
+  title: { absolute: HOME_TITLE },
+};
+
+export default async function HomePage() {
+  const [works, styles, interps] = await Promise.all([
+    listWorks({ status: "published", limit: 8 }),
+    listStyles(),
+    listInterpretations({ status: "published" }),
+  ]);
+  const published = works.filter((w) => w.status === "published");
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-10">
+      <JsonLd
+        data={itemListJsonLd(
+          published.map((w) => ({
+            name: `《${w.title}》`,
+            path: `/works/${w.slug}`,
+          })),
+          "经典解读 · 最新收录作品"
+        )}
+      />
+
       {/* Hero */}
       <section className="text-center py-12">
         <h1 className="font-serif-read text-4xl md:text-5xl font-bold tracking-wide">
@@ -64,21 +84,21 @@ export default function HomePage() {
       {/* 最新作品 */}
       <section className="mb-12">
         <div className="flex items-baseline justify-between mb-3">
-          <h2 className="text-sm text-[var(--muted)] tracking-widest">
-            {loading ? "加载中…" : "最新收录"}
-          </h2>
+          <h2 className="text-sm text-[var(--muted)] tracking-widest">最新收录</h2>
           <Link href="/works" className="text-sm text-[var(--accent)] hover:underline">
             全部作品 →
           </Link>
         </div>
-        {!loading && works.length === 0 && (
+        {published.length === 0 && (
           <div className="rounded-lg border border-dashed border-[var(--border)] p-10 text-center text-[var(--muted)]">
             内容筹备中——前往后台录入或导入第一部经典吧。
           </div>
         )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {works.map((w) => {
-            const count = interps.filter((i) => i.work_id === w.id).length;
+          {published.map((w) => {
+            const count = interps.filter(
+              (i) => i.work_id === w.id && i.status === "published"
+            ).length;
             const chars = w.content?.length ?? 0;
             const minutes = Math.max(1, Math.round(chars / 400));
             return (

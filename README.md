@@ -86,19 +86,33 @@ npm start
 | `CLOUD_PUBLISHABLE_KEY` | 云服务 publishable key（`wbpk_` 开头），仅服务端使用 |
 | `CLOUD_OAUTH_RELAY_BASE_URL` | OAuth relay 地址，可选 |
 | `CLOUD_RESOURCE_ID` | 资源 ID，可选 |
+| `SITE_URL` | 站点规范地址（默认平台域名），影响 canonical / OpenGraph / sitemap / JSON-LD |
+
+## SEO
+
+- 首页、作品库、作品详情、解读详情、关于页均为**服务端渲染**，首屏 HTML 直接包含正文，不依赖浏览器执行 JS。
+- 每页通过 `generateMetadata` / `buildMetadata()` 生成独立 `title`、`description`、`canonical`、OpenGraph 与 Twitter 卡片；详情页额外带 `publishedTime` / `modifiedTime` / `authors`。
+- 注入 `WebSite`、`Article`、`BreadcrumbList`、`ItemList`、`AboutPage` JSON-LD（`src/components/JsonLd.tsx` 会转义内容中的 `<`，避免 XSS）。
+- `sitemap.ts` 动态列出静态页与全部已发布作品 / 解读（含 `lastModified`），`robots.ts` 允许公开页、屏蔽 `/admin` 与 `/api/`。
+- 服务端查询一律带 `status='published'` 过滤，草稿与下架内容不会进入公开 HTML 或站点地图。
+- 若绑定自有域名，只需设置 `SITE_URL`，所有 canonical 与 sitemap URL 会自动切换。
 
 ## 目录结构
 
 ```
 src/
 ├─ app/
-│  ├─ page.tsx / about / works / interpretations   # 前台页面
+│  ├─ page.tsx / about / works / interpretations   # 前台页面（服务端渲染）
 │  ├─ admin/                                       # 后台页面
+│  ├─ sitemap.ts / robots.ts / not-found.tsx        # 站点地图、robots 与 404
 │  └─ api/
 │     ├─ data/route.ts          # 只读数据代理（按登录态过滤）
 │     ├─ admin/{login,logout,session,db}/          # 会话与写库代理
 │     └─ ai/{models,generate,search}/              # AI 能力代理（需登录 + 限流）
+├─ components/
+│  └─ JsonLd.tsx        # 服务端注入结构化数据（转义防 XSS）
 ├─ lib/
+│  ├─ seo.ts            # 站点地址、页面 metadata 与 JSON-LD 构造（server-only）
 │  ├─ publicConfig.ts   # 服务端云配置（server-only，读环境变量）
 │  ├─ cloud.ts          # 服务端唯一的云 SDK 客户端（server-only）
 │  ├─ serverQueries.ts  # 服务端直连数据库的查询（server-only）
@@ -146,7 +160,7 @@ generation_jobs（生成任务）  ── 异步生成任务记录
 - [x] AI 调用收拢到服务端，前端 bundle 不再含云凭证
 - [x] git 历史清理（filter-repo 抹除旧口令与硬编码云配置）并强制推送
 - [x] 部署上线，具备公网域名
+- [x] 页面级 SEO：内容页服务端渲染 + 独立 metadata / OG / canonical + JSON-LD + `sitemap.xml` / `robots.txt`
 - [ ] 全文人工校对：AI 回忆的课文仍可能存在个别字词出入
-- [ ] 页面级 SEO：首页与详情页仍是客户端取数，缺少 `generateMetadata` / OG
 - [ ] 后台口令替换为正式账号体系；会话改为可服务端吊销
 - [ ] 绑定自有域名（当前使用平台分配的 `*.app.workbuddy.host` 分享域名）
